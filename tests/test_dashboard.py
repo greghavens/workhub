@@ -225,6 +225,7 @@ def test_remote_pm_consent_in_browser(env):
         # A later sign-in returns to the dashboard instead of the consumed request.
         page.goto(origin)
         page.get_by_role("button", name="Sign out").click()
+        expect(page.get_by_role("button", name="Continue with GitHub")).to_be_enabled()
         page.get_by_role("button", name="Continue with GitHub").click()
         expect(page.get_by_role("heading", name="Work queue", exact=True)).to_be_visible()
         assert "mcp_request" not in page.url
@@ -242,6 +243,7 @@ def test_remote_pm_consent_in_browser(env):
         # A contributor sees the request but cannot delegate owner authority.
         page.goto(origin)
         page.get_by_role("button", name="Sign out").click()
+        expect(page.get_by_role("button", name="Continue with GitHub")).to_be_enabled()
         github_user[0] = "bob"
         page.goto(authorize_url("pm-contributor"))
         page.get_by_role("button", name="Continue with GitHub").click()
