@@ -1,0 +1,312 @@
+"""Deploy the hub locally (Compose) or to Cloudflare Workers (Python Worker + Durable Object)."""
+
+import json
+import re
+import secrets
+import shutil
+import subprocess
+import time
+from importlib.metadata import requires, version
+from pathlib import Path
+
+import httpx
+from cryptography.fernet import Fernet
+
+from workhub.client import ClientError, write_private
+
+COMPATIBILITY_DATE = "2026-10-01"
+# pywrangler runs `npx wrangler`, which prefers the project's own install; pin a tested version.
+WRANGLER_VERSION = "4.165.0"
+PYWRANGLER_MIN_UV = (0, 13, 4)
+# Server dependencies only; the CLI, local server, and PostgreSQL driver stay local.
+LOCAL_ONLY = {"psycopg", "typer", "python-dotenv", "uvicorn"}
+WORKERS_DEV = re.compile(r"https://[A-Za-z0-9.-]+\.workers\.dev")
+
+
+def run(args, cwd=None, env=None, capture=True):
+    try:
+        result = subprocess.run(
+            args, cwd=cwd, env=env, text=True, capture_output=capture, check=False
+        )
+    except FileNotFoundError as exc:
+        raise ClientError(f"{args[0]} is not installed") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "").strip() if capture else ""
+        raise ClientError(
+            f"{' '.join(args[:3])} failed" + (f": {detail[-2000:]}" if detail else "")
+        )
+    return result.stdout if capture else ""
+
+
+def summary(url):
+    return "\n".join(
+        [
+            f"Work Hub is running at {url}",
+            f"  Dashboard:              {url}/",
+            f"  Contributor MCP:        {url}/mcp",
+            f"  Product-manager MCP:    {url}/mcp/pm",
+            f"  GitHub OAuth callback:  {url}/auth/github/callback",
+            f"  GitHub webhook URL:     {url}/webhooks/github",
+        ]
+    )
+
+
+def wait_healthy(url, attempts=60, delay=2.0):
+    for _ in range(attempts):
+        try:
+            response = httpx.get(url + "/health", timeout=10)
+            if response.status_code == 200 and response.json().get("status") == "ok":
+                return response.json()
+        except (httpx.HTTPError, ValueError):
+            pass
+        time.sleep(delay)
+    raise ClientError(f"{url}/health did not become healthy")
+
+
+class Cloudflare:
+    """Builds a Python Worker project from the installed hub and drives pywrangler."""
+
+    def __init__(self, directory, name="workhub", domain=None, sync_seconds=120, runner=run):
+        self.directory = Path(directory)
+        self.name, self.domain, self.sync_seconds = name, domain, sync_seconds
+        self.run = runner
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", name):
+            raise ClientError("Worker names use lowercase letters, digits, and hyphens")
+        if domain and not re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", domain):
+            raise ClientError("Use a bare hostname for --domain, e.g. hub.example.com")
+
+    @property
+    def state_path(self):
+        return self.directory / "state.json"
+
+    @property
+    def secrets_path(self):
+        return self.directory / "secrets.json"
+
+    def state(self):
+        return json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+
+    def secrets(self):
+        """Generated once. The encryption key must survive every redeploy or data is lost."""
+        if not self.secrets_path.exists():
+            self.directory.mkdir(parents=True, exist_ok=True)
+            write_private(
+                self.secrets_path,
+                json.dumps(
+                    {
+                        "WORKHUB_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                        "WORKHUB_ADMIN_TOKEN": secrets.token_urlsafe(40),
+                    },
+                    indent=2,
+                ),
+            )
+        return json.loads(self.secrets_path.read_text())
+
+    def requirements(self):
+        result = []
+        for requirement in requires("workhub") or []:
+            if "extra ==" in requirement:
+                continue
+            name = re.split(r"[\s\[<>=!~;]", requirement, maxsplit=1)[0].lower()
+            if name not in LOCAL_ONLY:
+                result.append(requirement)
+        return result
+
+    def build(self, public_url):
+        import workhub
+
+        source = self.directory / "src"
+        package = source / "workhub"
+        if package.exists():
+            shutil.rmtree(package)
+        shutil.copytree(
+            Path(workhub.__file__).parent,
+            package,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for stale in source.glob("workhub-*.dist-info"):
+            shutil.rmtree(stale)
+        metadata = source / f"workhub-{version('workhub')}.dist-info"
+        metadata.mkdir()
+        # The API reports its version from package metadata, as an installed hub does.
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: workhub\nVersion: {version('workhub')}\n"
+        )
+        (source / "entry.py").write_text(
+            "# Generated by `workhub deploy cloudflare`.\n"
+            "from workhub.cloudflare_worker import Default, HubStore  # noqa: F401\n"
+        )
+        dependencies = ",\n".join(f"  {json.dumps(r)}" for r in self.requirements())
+        (self.directory / "pyproject.toml").write_text(
+            "# Generated by `workhub deploy cloudflare`.\n"
+            "[project]\n"
+            f'name = "{self.name}"\n'
+            f'version = "{version("workhub")}"\n'
+            'requires-python = ">=3.12"\n'
+            f"dependencies = [\n{dependencies},\n]\n\n"
+            '[dependency-groups]\ndev = ["workers-py"]\n'
+        )
+        (self.directory / "package.json").write_text(
+            json.dumps(
+                {"private": True, "devDependencies": {"wrangler": WRANGLER_VERSION}}, indent=2
+            )
+            + "\n"
+        )
+        minutes = max(1, min(59, self.sync_seconds // 60))
+        config = {
+            "$schema": "node_modules/wrangler/config-schema.json",
+            "name": self.name,
+            "main": "src/entry.py",
+            "compatibility_date": COMPATIBILITY_DATE,
+            "compatibility_flags": ["python_workers"],
+            "durable_objects": {"bindings": [{"name": "HUB", "class_name": "HubStore"}]},
+            "migrations": [{"tag": "v1", "new_sqlite_classes": ["HubStore"]}],
+            "triggers": {"crons": [f"*/{minutes} * * * *"]},
+            "vars": {
+                "WORKHUB_PUBLIC_URL": public_url,
+                "WORKHUB_SYNC_SECONDS": str(self.sync_seconds),
+            },
+            "observability": {"enabled": True},
+            # Wrangler bundles only Python modules and a few text types by default; the
+            # dashboard assets and the version metadata are read from the filesystem.
+            "rules": [
+                {
+                    "type": "Data",
+                    "globs": ["workhub/static/**", "workhub-*.dist-info/*"],
+                    "fallthrough": True,
+                }
+            ],
+        }
+        if self.domain:
+            config["routes"] = [{"pattern": self.domain, "custom_domain": True}]
+        (self.directory / "wrangler.jsonc").write_text(
+            "// Generated by `workhub deploy cloudflare`; edit the command options instead.\n"
+            + json.dumps(config, indent=2)
+            + "\n"
+        )
+
+    def tool_environment(self):
+        """pywrangler needs a newer uv than many systems have; use a private copy if needed."""
+        import os
+
+        environment = dict(os.environ)
+        if not shutil.which("npx"):
+            raise ClientError("Node.js (npx) is required to run wrangler")
+        current = self.run(["uv", "--version"]).split()[1]
+        if tuple(int(p) for p in re.findall(r"\d+", current)[:3]) < PYWRANGLER_MIN_UV:
+            bin_dir = self.run(
+                [
+                    "uvx",
+                    "--from",
+                    "uv>=" + ".".join(map(str, PYWRANGLER_MIN_UV)),
+                    "python",
+                    "-c",
+                    "import uv, pathlib; print(pathlib.Path(uv.find_uv_bin()).parent)",
+                ]
+            ).strip()
+            environment["PATH"] = bin_dir + os.pathsep + environment.get("PATH", "")
+        return environment
+
+    def ensure_wrangler(self):
+        installed = self.directory / "node_modules" / "wrangler" / "package.json"
+        if (
+            not installed.exists()
+            or json.loads(installed.read_text())["version"] != WRANGLER_VERSION
+        ):
+            self.run(["npm", "install", "--no-audit", "--no-fund"], cwd=self.directory)
+
+    def pywrangler(self, *args, capture=True):
+        self.ensure_wrangler()
+        return self.run(
+            ["uvx", "--from", "workers-py", "pywrangler", *args],
+            cwd=self.directory,
+            env=self.tool_environment(),
+            capture=capture,
+        )
+
+    def dev(self, port):
+        url = f"http://127.0.0.1:{port}"
+        self.build(url)
+        values = {**self.secrets(), "WORKHUB_PUBLIC_URL": url}
+        write_private(
+            self.directory / ".dev.vars",
+            "".join(f"{key}={json.dumps(value)}\n" for key, value in values.items()),
+        )
+        print(summary(url) + "\nRunning locally in workerd; press Ctrl-C to stop.", flush=True)
+        self.pywrangler(
+            "dev", "--ip", "127.0.0.1", "--port", str(port), "--test-scheduled", capture=False
+        )
+
+    def upload(self, attempts=4, delay=10.0):
+        for attempt in range(attempts):
+            try:
+                return self.pywrangler("deploy", "--secrets-file", str(self.secrets_path.resolve()))
+            except ClientError as exc:
+                # A newly created Worker can briefly be reported missing right after its first
+                # upload (code 10007). Redeploying the same version is idempotent.
+                if "code: 10007" not in str(exc) or attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
+
+    def deploy(self):
+        self.secrets()
+        self.build(self.state().get("url") or "https://pending.workers.dev")
+        whoami = self.pywrangler("whoami")
+        if "not authenticated" in whoami.lower():
+            raise ClientError("Sign in with `npx wrangler login` or set CLOUDFLARE_API_TOKEN")
+        state = self.state()
+        url = f"https://{self.domain}" if self.domain else state.get("url")
+        for _ in range(2):
+            self.build(url or "https://pending.workers.dev")
+            output = self.upload()
+            found = url or (WORKERS_DEV.findall(output) or [None])[-1]
+            if not found:
+                raise ClientError("Deployed, but wrangler did not report the Worker URL")
+            if found == url:
+                break
+            url = found  # First workers.dev deployment: redeploy with the real public URL.
+        write_private(self.state_path, json.dumps({"name": self.name, "url": url}, indent=2))
+        health = wait_healthy(url)
+        return url, health
+
+
+def local(env_file=Path(".env"), compose_file=Path("compose.yaml"), runner=run):
+    """Build and start PostgreSQL, the API, and the worker with Compose on this machine."""
+    if not compose_file.exists():
+        raise ClientError(f"{compose_file} not found; run from the Work Hub source checkout")
+    if not env_file.exists():
+        write_private(
+            env_file,
+            "\n".join(
+                [
+                    f"WORKHUB_ENCRYPTION_KEY={Fernet.generate_key().decode()}",
+                    f"WORKHUB_ADMIN_TOKEN={secrets.token_urlsafe(40)}",
+                    f"WORKHUB_POSTGRES_PASSWORD={secrets.token_urlsafe(32)}",
+                    "WORKHUB_URL=http://127.0.0.1:8000",
+                    "WORKHUB_PUBLIC_URL=http://127.0.0.1:8000",
+                    "",
+                ]
+            ),
+        )
+    compose = None
+    for engine in ("docker", "podman"):
+        if shutil.which(engine):
+            try:
+                # A CLI without a reachable engine (e.g. docker beside rootless podman) is skipped.
+                runner([engine, "info"])
+                runner([engine, "compose", "version"])
+                compose = [engine, "compose"]
+                break
+            except ClientError:
+                continue
+    if not compose:
+        raise ClientError("Docker Compose or Podman Compose is required")
+    runner(
+        [*compose, "--env-file", str(env_file), "-f", str(compose_file), "up", "-d", "--build"],
+        capture=False,
+    )
+    from dotenv import dotenv_values
+
+    health = wait_healthy("http://127.0.0.1:8000")
+    public = dotenv_values(env_file).get("WORKHUB_PUBLIC_URL") or "http://127.0.0.1:8000"
+    return public.rstrip("/"), health

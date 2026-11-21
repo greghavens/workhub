@@ -1,0 +1,17 @@
+schema_version: 1
+enabled: true
+allowed_paths:
+  - src/**
+  - tests/**
+forbidden_paths:
+  - .github/workflows/**
+setup:
+  - [uv, sync, --frozen, --group, dev]
+validation:
+  - [uv, run, pytest, -q]
+  - [uv, run, ruff, check, .]
+required_checks: [] # Set actual GitHub check names, e.g. "test (sqlite)".
+required_tools: [python, uv]
+dependency_changes: false
+delivery: either # branch, fork, or either
+max_work_minutes: 60

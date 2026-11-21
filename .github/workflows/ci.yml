@@ -1,0 +1,63 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        database: [sqlite, postgres, durable]
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: workhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.26"
+          python-version: "3.13"
+      - run: uv sync --frozen --group dev
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run ruff check . && uv run ruff format --check .
+      - if: matrix.database == 'sqlite'
+        run: uv run pytest -q
+        env:
+          WORKHUB_BROWSER_TESTS: "1"
+      - if: matrix.database == 'postgres'
+        run: uv run pytest -q
+        env:
+          WORKHUB_BROWSER_TESTS: "1"
+          WORKHUB_TEST_DATABASE_URL: postgresql+psycopg://postgres:test-only@localhost:5432/workhub_test
+      - if: matrix.database == 'durable'
+        # Cloudflare Durable Object SQLite, through the production adapter.
+        run: uv run pytest -q
+        env:
+          WORKHUB_BROWSER_TESTS: "1"
+          WORKHUB_TEST_DATABASE_URL: durable
+  workerd:
+    # The Cloudflare build running in workerd via `wrangler dev`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.26"
+          python-version: "3.13"
+      - run: uv sync --frozen --group dev
+      - run: uv run pytest -q tests/test_workerd.py
+        env:
+          WORKHUB_WORKERD_TESTS: "1"

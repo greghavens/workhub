@@ -1,0 +1,59 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: workhub
+      POSTGRES_USER: workhub
+      POSTGRES_PASSWORD: ${WORKHUB_POSTGRES_PASSWORD:?Run workhub init first}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workhub -d workhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build: .
+    environment: &hub-environment
+      WORKHUB_DATABASE_URL: postgresql+psycopg://workhub:${WORKHUB_POSTGRES_PASSWORD}@db/workhub
+      WORKHUB_ENCRYPTION_KEY: ${WORKHUB_ENCRYPTION_KEY:?Run workhub init first}
+      WORKHUB_ADMIN_TOKEN: ${WORKHUB_ADMIN_TOKEN:?Run workhub init first}
+      WORKHUB_PUBLIC_URL: ${WORKHUB_PUBLIC_URL:-http://127.0.0.1:8000}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      WORKHUB_ADMIN_GITHUB_IDS: ${WORKHUB_ADMIN_GITHUB_IDS:-}
+      WORKHUB_SESSION_SECONDS: ${WORKHUB_SESSION_SECONDS:-86400}
+      WORKHUB_SYNC_SECONDS: ${WORKHUB_SYNC_SECONDS:-120}
+      WORKHUB_LEASE_SECONDS: ${WORKHUB_LEASE_SECONDS:-900}
+      WORKHUB_MAX_WORK_MINUTES: ${WORKHUB_MAX_WORK_MINUTES:-240}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["workhub", "worker"]
+    environment: *hub-environment
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres:

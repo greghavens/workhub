@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Work Hub</title><link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Work Hub home"><span class="brand-mark">W</span> Work Hub</a>
+    <p class="sidebar-label">YOUR CONTRIBUTION NETWORK</p>
+    <nav aria-label="Main navigation">
+      <button data-view="queue" class="nav-item selected"><span aria-hidden="true">▦</span> Work queue</button>
+      <button data-view="sources" class="nav-item admin-only"><span aria-hidden="true">◫</span> Repositories &amp; sources</button>
+      <button data-view="people" class="nav-item admin-only"><span aria-hidden="true">♧</span> Contributors</button>
+      <button data-view="activity" class="nav-item admin-only"><span aria-hidden="true">≋</span> Activity</button>
+      <button data-view="settings" class="nav-item admin-only"><span aria-hidden="true">⚙</span> Connections</button>
+    </nav>
+    <div class="sidebar-footer"><span class="network-icon">◇</span><p>Many agents.<br>One approved plan.</p></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span class="crumb">WORKSPACE <b>/</b> <span id="crumb-name">Overview</span></span>
+      <div class="account"><span id="identity">Not signed in</span><button id="logout" class="quiet hidden">Sign out</button></div>
+    </header>
+    <main id="main" tabindex="-1">
+      <section id="login" class="login-card hidden">
+        <span class="eyebrow">WELCOME TO WORK HUB</span><h1>Good work starts<br>with a clear contract.</h1>
+        <p>Connect your GitHub account to find approved work, contribute with your agent, and follow every change through review.</p>
+        <form id="login-form">
+          <label for="invitation">Invitation code <span class="muted">(first visit only)</span></label>
+          <input id="invitation" name="invitation" type="password" autocomplete="off" placeholder="Paste the code from your hub owner">
+          <label for="login-provider">GitHub connection</label><select id="login-provider"><option value="oauth">GitHub account</option><option value="app">GitHub App</option></select>
+          <button class="primary" type="submit">Continue with GitHub</button>
+        </form>
+        <p id="setup-notice" class="notice hidden">The owner needs to configure a GitHub connection before sign-in is available.</p>
+        <details><summary>Owner setup or existing access token</summary><form id="bootstrap-form">
+          <label for="bootstrap-token">Hub access token</label><input id="bootstrap-token" type="password" required autocomplete="off">
+          <button type="submit" class="secondary">Open workspace</button></form></details>
+      </section>
+      <section id="workspace-content" class="hidden">
+        <div class="page-heading"><div><span class="eyebrow" id="view-eyebrow">APPROVED. ASSIGNED. DELIVERED.</span>
+          <h1 id="view-title">Work queue</h1><p id="view-description">Clear assignments for the people and agents moving your projects forward.</p></div>
+          <div id="page-actions" class="actions"></div></div>
+        <div id="content"><p class="empty">Loading your workspace…</p></div>
+      </section>
+      <noscript>This dashboard needs JavaScript. The CLI and HTTP API are also available.</noscript>
+    </main>
+    <footer class="page-footer">Work Hub <span>Built for shared effort. Reviewed by people.</span><a href="/docs">API reference</a></footer>
+  </div>
+  <dialog id="dialog"><div class="dialog-heading"><h2 id="dialog-title"></h2><button id="close-dialog" class="icon-button" aria-label="Close dialog">×</button></div><div id="dialog-body"></div></dialog>
+  <div id="toast" role="status" aria-live="polite" class="toast hidden"></div>
+</body>
+</html>
